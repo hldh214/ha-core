@@ -1,10 +1,18 @@
 """Support for Tuya cameras."""
 from __future__ import annotations
 
+import asyncio
+import async_timeout
+
 from tuya_iot import TuyaDevice, TuyaDeviceManager
 
 from homeassistant.components import ffmpeg
-from homeassistant.components.camera import Camera as CameraEntity, CameraEntityFeature
+from homeassistant.components.camera import (
+    Camera as CameraEntity,
+    CameraEntityFeature,
+    CAMERA_STREAM_SOURCE_TIMEOUT,
+)
+from homeassistant.components.stream import Stream
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -24,7 +32,7 @@ CAMERAS: tuple[str, ...] = (
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+        hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     """Set up Tuya cameras dynamically through Tuya discovery."""
     hass_data: HomeAssistantTuyaData = hass.data[DOMAIN][entry.entry_id]
@@ -54,14 +62,15 @@ class TuyaCameraEntity(TuyaEntity, CameraEntity):
     _attr_brand = "Tuya"
 
     def __init__(
-        self,
-        device: TuyaDevice,
-        device_manager: TuyaDeviceManager,
+            self,
+            device: TuyaDevice,
+            device_manager: TuyaDeviceManager,
     ) -> None:
         """Init Tuya Camera."""
         super().__init__(device, device_manager)
         CameraEntity.__init__(self)
         self._attr_model = device.product_name
+        self._update_stream_lock: asyncio.Lock | None = None
 
     @property
     def is_recording(self) -> bool:
@@ -81,8 +90,25 @@ class TuyaCameraEntity(TuyaEntity, CameraEntity):
             "rtsp",
         )
 
+    async def async_create_stream(self) -> Stream | None:
+        """Create a Stream for stream_source."""
+        if not self.stream:
+            return await super().async_create_stream()
+
+        # Tuya streams urls are one time urls. Updating source of existing stream.
+        if not self._update_stream_lock:
+            self._update_stream_lock = asyncio.Lock()
+        async with self._update_stream_lock:
+            async with async_timeout.timeout(CAMERA_STREAM_SOURCE_TIMEOUT):
+                source = await self.stream_source()
+            if not source:
+                return None
+            self.stream.update_source(source)
+
+        return self.stream
+
     async def async_camera_image(
-        self, width: int | None = None, height: int | None = None
+            self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
         """Return a still image response from the camera."""
         stream_source = await self.stream_source()
